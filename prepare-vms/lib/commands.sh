@@ -229,7 +229,7 @@ EOF"
     pssh "
     if [ ! -x /usr/local/bin/stern ]; then
         ##VERSION##
-        sudo curl -L -o /usr/local/bin/stern https://github.com/wercker/stern/releases/download/1.10.0/stern_linux_amd64 &&
+        sudo curl -L -o /usr/local/bin/stern https://github.com/wercker/stern/releases/download/1.11.0/stern_linux_amd64 &&
         sudo chmod +x /usr/local/bin/stern &&
         stern --completion bash | sudo tee /etc/bash_completion.d/stern
     fi"
@@ -246,6 +246,14 @@ EOF"
     if [ ! -x /usr/local/bin/ship ]; then
         curl -L https://github.com/replicatedhq/ship/releases/download/v0.40.0/ship_0.40.0_linux_amd64.tar.gz |
              sudo tar -C /usr/local/bin -zx ship
+    fi"
+
+    # Install the AWS IAM authenticator
+    pssh "
+    if [ ! -x /usr/local/bin/aws-iam-authenticator ]; then
+	##VERSION##
+        sudo curl -o /usr/local/bin/aws-iam-authenticator https://amazon-eks.s3-us-west-2.amazonaws.com/1.12.7/2019-03-27/bin/linux/amd64/aws-iam-authenticator
+	sudo chmod +x /usr/local/bin/aws-iam-authenticator
     fi"
 
     sep "Done"
@@ -308,6 +316,14 @@ _cmd_listall() {
             ;;
         esac
     done
+}
+
+_cmd ping "Ping VMs in a given tag, to check that they have network access"
+_cmd_ping() {
+    TAG=$1
+    need_tag
+
+    fping < tags/$TAG/ips.txt
 }
 
 _cmd netfix "Disable GRO and run a pinger job on the VMs"
@@ -381,6 +397,15 @@ _cmd_retag() {
         die "You must specify a new tag to apply."
     fi
     aws_tag_instances $OLDTAG $NEWTAG
+}
+
+_cmd ssh "Open an SSH session to the first node of a tag"
+_cmd_ssh() {
+    TAG=$1
+    need_tag
+    IP=$(head -1 tags/$TAG/ips.txt)
+    info "Logging into $IP"
+    ssh docker@$IP
 }
 
 _cmd start "Start a group of VMs"
@@ -481,12 +506,12 @@ _cmd_helmprom() {
     if i_am_first_node; then
         kubectl -n kube-system get serviceaccount helm ||
             kubectl -n kube-system create serviceaccount helm
-        helm init --service-account helm
+        sudo -u docker -H helm init --service-account helm
         kubectl get clusterrolebinding helm-can-do-everything ||
             kubectl create clusterrolebinding helm-can-do-everything \
                 --clusterrole=cluster-admin \
                 --serviceaccount=kube-system:helm
-        helm upgrade --install prometheus stable/prometheus \
+        sudo -u docker -H helm upgrade --install prometheus stable/prometheus \
             --namespace kube-system \
             --set server.service.type=NodePort \
             --set server.service.nodePort=30090 \
@@ -509,6 +534,38 @@ _cmd_weavetest() {
     kubectl -n kube-system get pods -o name | grep weave | cut -d/ -f2 |
     xargs -I POD kubectl -n kube-system exec POD -c weave -- \
     sh -c \"./weave --local status | grep Connections | grep -q ' 1 failed' || ! echo POD \""
+}
+
+_cmd webssh "Install a WEB SSH server on the machines (port 1080)"
+_cmd_webssh() {
+    TAG=$1
+    need_tag
+    pssh "
+    sudo apt-get update &&
+    sudo apt-get install python-tornado python-paramiko -y"
+    pssh "
+    [ -d webssh ] || git clone https://github.com/jpetazzo/webssh"
+    pssh "
+    for KEYFILE in /etc/ssh/*.pub; do
+      read a b c < \$KEYFILE; echo localhost \$a \$b
+    done > webssh/known_hosts"
+    pssh "cat >webssh.service <<EOF
+[Unit]
+Description=webssh
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+WorkingDirectory=/home/ubuntu/webssh
+ExecStart=/usr/bin/env python run.py --fbidhttp=false --port=1080 --policy=reject
+User=nobody
+Group=nogroup
+Restart=always
+EOF"
+    pssh "
+    sudo systemctl enable \$PWD/webssh.service &&
+    sudo systemctl start webssh.service"
 }
 
 greet() {
